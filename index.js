@@ -2,16 +2,23 @@ require('dotenv').config();
 const {
     DisconnectReason,
     jidNormalizedUser,
-    proto
+    proto,
+    fetchLatestBaileysVersion,
+    makeCacheableSignalKeyStore,
+    makeInMemoryStore,
+    useMultiFileAuthState,
+    makeWASocket,
+    Browsers
 } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
+const P = require('pino');
+const QRCode = require('qrcode');
 
 const { wasi_connectSession, wasi_clearSession } = require('./wasilib/session');
 const { wasi_connectDatabase } = require('./wasilib/database');
-
 const config = require('./wasi');
 
 // Load persistent config
@@ -27,12 +34,12 @@ try {
 const wasi_app = express();
 const wasi_port = process.env.PORT || 3000;
 
-const QRCode = require('qrcode');
-
 // -----------------------------------------------------------------------------
 // SESSION STATE
 // -----------------------------------------------------------------------------
 const sessions = new Map();
+const qrTimeouts = new Map();
+const keepAliveIntervals = new Map(); // NEW: Keep-alive intervals
 
 // Middleware
 wasi_app.use(express.json());
@@ -71,18 +78,12 @@ const NEW_TEXT = process.env.NEW_TEXT
 // HELPER FUNCTIONS FOR MESSAGE CLEANING
 // -----------------------------------------------------------------------------
 
-/**
- * Clean forwarded label from message
- */
 function cleanForwardedLabel(message) {
     try {
-        // Clone the message to avoid modifying original
         let cleanedMessage = JSON.parse(JSON.stringify(message));
         
-        // Remove forwarded flag from different message types
         if (cleanedMessage.extendedTextMessage?.contextInfo) {
             cleanedMessage.extendedTextMessage.contextInfo.isForwarded = false;
-            // Also remove forwarding news if present
             if (cleanedMessage.extendedTextMessage.contextInfo.forwardingScore) {
                 cleanedMessage.extendedTextMessage.contextInfo.forwardingScore = 0;
             }
@@ -116,18 +117,12 @@ function cleanForwardedLabel(message) {
             }
         }
         
-        // Remove newsletter/broadcast specific markers
         if (cleanedMessage.protocolMessage) {
-            // For newsletter messages, we extract the actual message content
             if (cleanedMessage.protocolMessage.type === 14 || 
                 cleanedMessage.protocolMessage.type === 26) {
-                // These are typically newsletter/broadcast messages
-                // We'll try to extract the actual message if possible
                 if (cleanedMessage.protocolMessage.historySyncNotification) {
-                    // Extract from history sync
                     const syncData = cleanedMessage.protocolMessage.historySyncNotification;
                     if (syncData.pushName) {
-                        // Use pushName as sender info
                         console.log('Newsletter from:', syncData.pushName);
                     }
                 }
@@ -141,13 +136,9 @@ function cleanForwardedLabel(message) {
     }
 }
 
-/**
- * Clean newsletter/information markers from text
- */
 function cleanNewsletterText(text) {
     if (!text) return text;
     
-    // Remove common newsletter markers
     const newsletterMarkers = [
         /📢\s*/g,
         /🔔\s*/g,
@@ -169,19 +160,12 @@ function cleanNewsletterText(text) {
         cleanedText = cleanedText.replace(marker, '');
     });
     
-    // Trim extra whitespace
     cleanedText = cleanedText.trim();
-    
     return cleanedText;
 }
 
-/**
- * Replace caption text using regex patterns
- */
 function replaceCaption(caption) {
     if (!caption) return caption;
-    
-    // اگر OLD_TEXT_REGEX یا NEW_TEXT خالی ہوں تو کچھ نہیں کریں گے
     if (!OLD_TEXT_REGEX.length || !NEW_TEXT) return caption;
     
     let result = caption;
@@ -193,18 +177,11 @@ function replaceCaption(caption) {
     return result;
 }
 
-/**
- * Process and clean a message completely
- */
 function processAndCleanMessage(originalMessage) {
     try {
-        // Step 1: Clone the message
         let cleanedMessage = JSON.parse(JSON.stringify(originalMessage));
-        
-        // Step 2: Remove forwarded labels
         cleanedMessage = cleanForwardedLabel(cleanedMessage);
         
-        // Step 3: Extract text and clean newsletter markers
         const text = cleanedMessage.conversation ||
             cleanedMessage.extendedTextMessage?.text ||
             cleanedMessage.imageMessage?.caption ||
@@ -214,7 +191,6 @@ function processAndCleanMessage(originalMessage) {
         if (text) {
             const cleanedText = cleanNewsletterText(text);
             
-            // Update the cleaned text in appropriate field
             if (cleanedMessage.conversation) {
                 cleanedMessage.conversation = cleanedText;
             } else if (cleanedMessage.extendedTextMessage?.text) {
@@ -228,10 +204,8 @@ function processAndCleanMessage(originalMessage) {
             }
         }
         
-        // Step 4: Remove protocol messages (newsletter metadata)
         delete cleanedMessage.protocolMessage;
         
-        // Step 5: Remove newsletter sender info
         if (cleanedMessage.extendedTextMessage?.contextInfo?.participant) {
             const participant = cleanedMessage.extendedTextMessage.contextInfo.participant;
             if (participant.includes('newsletter') || participant.includes('broadcast')) {
@@ -241,7 +215,6 @@ function processAndCleanMessage(originalMessage) {
             }
         }
         
-        // Step 6: Ensure message appears as original (not forwarded)
         if (cleanedMessage.extendedTextMessage) {
             cleanedMessage.extendedTextMessage.contextInfo = cleanedMessage.extendedTextMessage.contextInfo || {};
             cleanedMessage.extendedTextMessage.contextInfo.isForwarded = false;
@@ -259,25 +232,16 @@ function processAndCleanMessage(originalMessage) {
 // COMMAND HANDLER FUNCTIONS
 // -----------------------------------------------------------------------------
 
-/**
- * Handle !ping command
- */
 async function handlePingCommand(sock, from) {
     await sock.sendMessage(from, { text: "Love You😘" });
     console.log(`Ping command executed for ${from}`);
 }
 
-/**
- * Handle !jid command - Get current chat JID
- */
 async function handleJidCommand(sock, from) {
     await sock.sendMessage(from, { text: `${from}` });
     console.log(`JID command executed for ${from}`);
 }
 
-/**
- * Handle !gjid command - Get all groups with details
- */
 async function handleGjidCommand(sock, from) {
     try {
         const groups = await sock.groupFetchAllParticipating();
@@ -289,7 +253,6 @@ async function handleGjidCommand(sock, from) {
             const groupName = group.subject || "Unnamed Group";
             const participantsCount = group.participants ? group.participants.length : 0;
             
-            // Determine group type
             let groupType = "Simple Group";
             if (group.isCommunity) {
                 groupType = "Community";
@@ -325,9 +288,6 @@ async function handleGjidCommand(sock, from) {
     }
 }
 
-/**
- * Process incoming messages for commands
- */
 async function processCommand(sock, msg) {
     const from = msg.key.remoteJid;
     const text = msg.message.conversation ||
@@ -356,13 +316,67 @@ async function processCommand(sock, msg) {
 }
 
 // -----------------------------------------------------------------------------
-// SESSION MANAGEMENT
+// KEEP-ALIVE MECHANISM - PREVENTS 50-MINUTE TIMEOUT
+// -----------------------------------------------------------------------------
+function startKeepAlive(sessionId, sock) {
+    // Clear existing interval
+    if (keepAliveIntervals.has(sessionId)) {
+        clearInterval(keepAliveIntervals.get(sessionId));
+        keepAliveIntervals.delete(sessionId);
+    }
+    
+    console.log(`🔄 Starting keep-alive for session: ${sessionId}`);
+    
+    // Send presence every 30 seconds to keep connection alive
+    const interval = setInterval(async () => {
+        try {
+            const session = sessions.get(sessionId);
+            if (!session || !session.isConnected || !session.sock) {
+                clearInterval(interval);
+                keepAliveIntervals.delete(sessionId);
+                return;
+            }
+            
+            // Send presence available
+            await session.sock.sendPresenceAvailable();
+            
+            // Also send read receipt for any pending messages (optional)
+            // This keeps the WebSocket connection active
+        } catch (error) {
+            // Silent fail - will try again next interval
+            if (error.message?.includes('reconnecting')) {
+                // Connection is reconnecting, clear interval
+                clearInterval(interval);
+                keepAliveIntervals.delete(sessionId);
+            }
+        }
+    }, 30000); // Every 30 seconds
+    
+    keepAliveIntervals.set(sessionId, interval);
+}
+
+// -----------------------------------------------------------------------------
+// SESSION MANAGEMENT WITH ENHANCED RECONNECTION
 // -----------------------------------------------------------------------------
 async function startSession(sessionId) {
+    // Clear any existing QR timeout for this session
+    if (qrTimeouts.has(sessionId)) {
+        clearTimeout(qrTimeouts.get(sessionId));
+        qrTimeouts.delete(sessionId);
+    }
+    
+    // Clear keep-alive if exists
+    if (keepAliveIntervals.has(sessionId)) {
+        clearInterval(keepAliveIntervals.get(sessionId));
+        keepAliveIntervals.delete(sessionId);
+    }
+
     if (sessions.has(sessionId)) {
         const existing = sessions.get(sessionId);
         if (existing.isConnected && existing.sock) {
             console.log(`Session ${sessionId} is already connected.`);
+            // Ensure keep-alive is running
+            startKeepAlive(sessionId, existing.sock);
             return;
         }
 
@@ -380,141 +394,226 @@ async function startSession(sessionId) {
         isConnected: false,
         qr: null,
         reconnectAttempts: 0,
+        lastQRTime: null,
+        isConnecting: false,
+        lastConnectionTime: null,
     };
     sessions.set(sessionId, sessionState);
 
-    const { wasi_sock, saveCreds } = await wasi_connectSession(false, sessionId);
-    sessionState.sock = wasi_sock;
+    try {
+        const { wasi_sock, saveCreds } = await wasi_connectSession(false, sessionId);
+        sessionState.sock = wasi_sock;
+        sessionState.isConnecting = true;
 
-    wasi_sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect, qr } = update;
+        wasi_sock.ev.on('connection.update', async (update) => {
+            const { connection, lastDisconnect, qr } = update;
 
-        if (qr) {
-            sessionState.qr = qr;
-            sessionState.isConnected = false;
-            console.log(`QR generated for session: ${sessionId}`);
-        }
-
-        if (connection === 'close') {
-            sessionState.isConnected = false;
-            const statusCode = (lastDisconnect?.error instanceof Boom) ?
-                lastDisconnect.error.output.statusCode : 500;
-
-            const shouldReconnect = statusCode !== DisconnectReason.loggedOut && statusCode !== 440;
-
-            console.log(`Session ${sessionId}: Connection closed, reconnecting: ${shouldReconnect}`);
-
-            if (shouldReconnect) {
-                setTimeout(() => {
-                    startSession(sessionId);
-                }, 3000);
-            } else {
-                console.log(`Session ${sessionId} logged out. Removing.`);
-                sessions.delete(sessionId);
-                await wasi_clearSession(sessionId);
-            }
-        } else if (connection === 'open') {
-            sessionState.isConnected = true;
-            sessionState.qr = null;
-            console.log(`✅ ${sessionId}: Connected to WhatsApp`);
-        }
-    });
-
-    wasi_sock.ev.on('creds.update', saveCreds);
-
-    // -------------------------------------------------------------------------
-    // AUTO FORWARD MESSAGE HANDLER
-    // -------------------------------------------------------------------------
-    wasi_sock.ev.on('messages.upsert', async wasi_m => {
-        const wasi_msg = wasi_m.messages[0];
-        if (!wasi_msg.message) return;
-
-        const wasi_origin = wasi_msg.key.remoteJid;
-        const wasi_text = wasi_msg.message.conversation ||
-            wasi_msg.message.extendedTextMessage?.text ||
-            wasi_msg.message.imageMessage?.caption ||
-            wasi_msg.message.videoMessage?.caption ||
-            wasi_msg.message.documentMessage?.caption || "";
-
-        // COMMAND HANDLER
-        if (wasi_text.startsWith('!')) {
-            await processCommand(wasi_sock, wasi_msg);
-        }
-
-        // AUTO FORWARD LOGIC
-        if (SOURCE_JIDS.includes(wasi_origin) && !wasi_msg.key.fromMe) {
-            try {
-                // Process and clean the message
-                let relayMsg = processAndCleanMessage(wasi_msg.message);
+            if (qr) {
+                sessionState.qr = qr;
+                sessionState.isConnected = false;
+                sessionState.lastQRTime = Date.now();
+                console.log(`📱 QR generated for session: ${sessionId}`);
                 
-                if (!relayMsg) return;
-
-                // View Once Unwrap
-                if (relayMsg.viewOnceMessageV2)
-                    relayMsg = relayMsg.viewOnceMessageV2.message;
-                if (relayMsg.viewOnceMessage)
-                    relayMsg = relayMsg.viewOnceMessage.message;
-
-                // Check for Media or Emoji Only
-                const isMedia = relayMsg.imageMessage ||
-                    relayMsg.videoMessage ||
-                    relayMsg.audioMessage ||
-                    relayMsg.documentMessage ||
-                    relayMsg.stickerMessage;
-
-                let isEmojiOnly = false;
-                if (relayMsg.conversation) {
-                    const emojiRegex = /^(?:\p{Extended_Pictographic}|\s)+$/u;
-                    isEmojiOnly = emojiRegex.test(relayMsg.conversation);
+                // Set timeout to regenerate QR if not scanned within 2 minutes
+                if (qrTimeouts.has(sessionId)) {
+                    clearTimeout(qrTimeouts.get(sessionId));
                 }
-
-                // Only forward if media or emoji
-                if (!isMedia && !isEmojiOnly) return;
-
-                // Apply caption replacement (already done in processAndCleanMessage)
-                // For safety, we'll do it again here
-                if (relayMsg.imageMessage?.caption) {
-                    relayMsg.imageMessage.caption = replaceCaption(relayMsg.imageMessage.caption);
-                }
-                if (relayMsg.videoMessage?.caption) {
-                    relayMsg.videoMessage.caption = replaceCaption(relayMsg.videoMessage.caption);
-                }
-                if (relayMsg.documentMessage?.caption) {
-                    relayMsg.documentMessage.caption = replaceCaption(relayMsg.documentMessage.caption);
-                }
-
-                console.log(`📦 Forwarding (cleaned) from ${wasi_origin}`);
-
-                // Forward to all target JIDs
-                for (const targetJid of TARGET_JIDS) {
-                    try {
-                        await wasi_sock.relayMessage(
-                            targetJid,
-                            relayMsg,
-                            { messageId: wasi_sock.generateMessageTag() }
-                        );
-                        console.log(`✅ Clean message forwarded to ${targetJid}`);
-                    } catch (err) {
-                        console.error(`Failed to forward to ${targetJid}:`, err.message);
+                
+                const timeout = setTimeout(() => {
+                    console.log(`⏰ QR code expired for session: ${sessionId}, regenerating...`);
+                    if (!sessionState.isConnected && sessionState.sock) {
+                        sessionState.sock.end(undefined);
+                        setTimeout(() => {
+                            startSession(sessionId);
+                        }, 1000);
                     }
+                }, 120000);
+                
+                qrTimeouts.set(sessionId, timeout);
+            }
+
+            if (connection === 'close') {
+                sessionState.isConnected = false;
+                sessionState.isConnecting = false;
+                sessionState.lastConnectionTime = Date.now();
+                
+                // Clear keep-alive on disconnect
+                if (keepAliveIntervals.has(sessionId)) {
+                    clearInterval(keepAliveIntervals.get(sessionId));
+                    keepAliveIntervals.delete(sessionId);
+                }
+                
+                // Clear QR timeout
+                if (qrTimeouts.has(sessionId)) {
+                    clearTimeout(qrTimeouts.get(sessionId));
+                    qrTimeouts.delete(sessionId);
+                }
+                
+                const statusCode = (lastDisconnect?.error instanceof Boom) ?
+                    lastDisconnect.error.output.statusCode : 500;
+
+                // Check if it's a logout or auth failure
+                const isLoggedOut = statusCode === DisconnectReason.loggedOut || 
+                                   statusCode === 440 ||
+                                   lastDisconnect?.error?.message?.includes('401');
+
+                if (isLoggedOut) {
+                    console.log(`❌ Session ${sessionId} logged out. Removing session.`);
+                    sessions.delete(sessionId);
+                    await wasi_clearSession(sessionId);
+                    return;
                 }
 
-            } catch (err) {
-                console.error('Auto Forward Error:', err.message);
+                // Regular reconnection with exponential backoff
+                const delay = Math.min(3000 * Math.pow(1.5, sessionState.reconnectAttempts), 30000);
+                sessionState.reconnectAttempts += 1;
+
+                console.log(`Session ${sessionId}: Connection closed, reconnecting in ${delay}ms (attempt ${sessionState.reconnectAttempts})`);
+
+                setTimeout(() => {
+                    if (!sessions.has(sessionId) || !sessions.get(sessionId).isConnected) {
+                        startSession(sessionId);
+                    }
+                }, delay);
+                
+            } else if (connection === 'open') {
+                sessionState.isConnected = true;
+                sessionState.isConnecting = false;
+                sessionState.qr = null;
+                sessionState.reconnectAttempts = 0;
+                sessionState.lastConnectionTime = Date.now();
+                
+                // Clear QR timeout on successful connection
+                if (qrTimeouts.has(sessionId)) {
+                    clearTimeout(qrTimeouts.get(sessionId));
+                    qrTimeouts.delete(sessionId);
+                }
+                
+                console.log(`✅ ${sessionId}: Connected to WhatsApp`);
+                
+                // START KEEP-ALIVE TO PREVENT TIMEOUT
+                startKeepAlive(sessionId, wasi_sock);
+                
+                // Send presence available
+                try {
+                    await wasi_sock.sendPresenceAvailable();
+                } catch (e) {
+                    // Ignore presence errors
+                }
             }
-        }
-    });
+        });
+
+        wasi_sock.ev.on('creds.update', saveCreds);
+
+        // AUTO FORWARD MESSAGE HANDLER
+        wasi_sock.ev.on('messages.upsert', async wasi_m => {
+            const wasi_msg = wasi_m.messages[0];
+            if (!wasi_msg.message) return;
+
+            const wasi_origin = wasi_msg.key.remoteJid;
+            const wasi_text = wasi_msg.message.conversation ||
+                wasi_msg.message.extendedTextMessage?.text ||
+                wasi_msg.message.imageMessage?.caption ||
+                wasi_msg.message.videoMessage?.caption ||
+                wasi_msg.message.documentMessage?.caption || "";
+
+            // COMMAND HANDLER
+            if (wasi_text.startsWith('!')) {
+                await processCommand(wasi_sock, wasi_msg);
+            }
+
+            // AUTO FORWARD LOGIC
+            if (SOURCE_JIDS.includes(wasi_origin) && !wasi_msg.key.fromMe) {
+                try {
+                    let relayMsg = processAndCleanMessage(wasi_msg.message);
+                    
+                    if (!relayMsg) return;
+
+                    if (relayMsg.viewOnceMessageV2)
+                        relayMsg = relayMsg.viewOnceMessageV2.message;
+                    if (relayMsg.viewOnceMessage)
+                        relayMsg = relayMsg.viewOnceMessage.message;
+
+                    const isMedia = relayMsg.imageMessage ||
+                        relayMsg.videoMessage ||
+                        relayMsg.audioMessage ||
+                        relayMsg.documentMessage ||
+                        relayMsg.stickerMessage;
+
+                    let isEmojiOnly = false;
+                    if (relayMsg.conversation) {
+                        const emojiRegex = /^(?:\p{Extended_Pictographic}|\s)+$/u;
+                        isEmojiOnly = emojiRegex.test(relayMsg.conversation);
+                    }
+
+                    if (!isMedia && !isEmojiOnly) return;
+
+                    if (relayMsg.imageMessage?.caption) {
+                        relayMsg.imageMessage.caption = replaceCaption(relayMsg.imageMessage.caption);
+                    }
+                    if (relayMsg.videoMessage?.caption) {
+                        relayMsg.videoMessage.caption = replaceCaption(relayMsg.videoMessage.caption);
+                    }
+                    if (relayMsg.documentMessage?.caption) {
+                        relayMsg.documentMessage.caption = replaceCaption(relayMsg.documentMessage.caption);
+                    }
+
+                    console.log(`📦 Forwarding (cleaned) from ${wasi_origin}`);
+
+                    for (const targetJid of TARGET_JIDS) {
+                        try {
+                            await wasi_sock.relayMessage(
+                                targetJid,
+                                relayMsg,
+                                { messageId: wasi_sock.generateMessageTag() }
+                            );
+                            console.log(`✅ Clean message forwarded to ${targetJid}`);
+                        } catch (err) {
+                            console.error(`Failed to forward to ${targetJid}:`, err.message);
+                        }
+                    }
+
+                } catch (err) {
+                    console.error('Auto Forward Error:', err.message);
+                }
+            }
+        });
+
+        // Handle socket errors
+        wasi_sock.ev.on('error', (error) => {
+            console.error(`Socket error for session ${sessionId}:`, error);
+        });
+
+    } catch (error) {
+        console.error(`Failed to start session ${sessionId}:`, error);
+        setTimeout(() => {
+            if (!sessions.has(sessionId) || !sessions.get(sessionId).isConnected) {
+                startSession(sessionId);
+            }
+        }, 5000);
+    }
 }
 
 // -----------------------------------------------------------------------------
 // API ROUTES
 // -----------------------------------------------------------------------------
+
+// API: GET STATUS
 wasi_app.get('/api/status', async (req, res) => {
     const sessionId = req.query.sessionId || config.sessionId || 'wasi_session';
     const session = sessions.get(sessionId);
 
     let qrDataUrl = null;
     let connected = false;
+    let dbConnected = false;
+
+    if (config.mongoDbUrl) {
+        try {
+            dbConnected = true;
+        } catch (e) {
+            dbConnected = false;
+        }
+    }
 
     if (session) {
         connected = session.isConnected;
@@ -525,16 +624,166 @@ wasi_app.get('/api/status', async (req, res) => {
         }
     }
 
+    const isConnecting = session?.isConnecting || false;
+    const hasKeepAlive = keepAliveIntervals.has(sessionId);
+
     res.json({
         sessionId,
         connected,
+        isConnecting,
         qr: qrDataUrl,
-        activeSessions: Array.from(sessions.keys())
+        qrAvailable: !!session?.qr,
+        dbConnected,
+        dbConfigured: !!config.mongoDbUrl,
+        phoneNumber: connected ? 'Connected ✅' : (isConnecting ? 'Connecting...' : 'Disconnected'),
+        lastActive: new Date().toISOString(),
+        keepAliveActive: hasKeepAlive,
+        uptime: session?.lastConnectionTime ? Math.floor((Date.now() - session.lastConnectionTime) / 1000) + 's' : 'N/A',
+        activeSessions: Array.from(sessions.keys()).map(id => ({
+            id,
+            connected: sessions.get(id)?.isConnected || false,
+            hasQR: !!sessions.get(id)?.qr,
+            keepAlive: keepAliveIntervals.has(id)
+        }))
     });
 });
 
-wasi_app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+// API: GENERATE NEW QR
+wasi_app.post('/api/generate-qr', async (req, res) => {
+    try {
+        const sessionId = req.query.sessionId || config.sessionId || 'wasi_session';
+        const session = sessions.get(sessionId);
+        
+        // Clear keep-alive
+        if (keepAliveIntervals.has(sessionId)) {
+            clearInterval(keepAliveIntervals.get(sessionId));
+            keepAliveIntervals.delete(sessionId);
+        }
+        
+        if (session && session.sock) {
+            session.sock.end(undefined);
+            setTimeout(() => {
+                startSession(sessionId);
+            }, 1000);
+            res.json({ success: true, message: 'Generating new QR code...' });
+        } else {
+            startSession(sessionId);
+            res.json({ success: true, message: 'Starting session with new QR...' });
+        }
+    } catch (error) {
+        console.error('Generate QR error:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// API: RESTART BOT
+wasi_app.post('/api/restart', async (req, res) => {
+    try {
+        console.log('🔄 Restarting bot...');
+        
+        // Clear all keep-alive intervals
+        for (const [sessionId, interval] of keepAliveIntervals) {
+            clearInterval(interval);
+        }
+        keepAliveIntervals.clear();
+        
+        // Clear all QR timeouts
+        for (const [sessionId, timeout] of qrTimeouts) {
+            clearTimeout(timeout);
+        }
+        qrTimeouts.clear();
+        
+        // Clear all sessions
+        for (const [sessionId, session] of sessions) {
+            if (session.sock) {
+                try {
+                    session.sock.end(undefined);
+                } catch (e) {
+                    console.error(`Error ending session ${sessionId}:`, e);
+                }
+            }
+        }
+        sessions.clear();
+        
+        setTimeout(() => {
+            main().catch(err => console.error('Restart error:', err));
+        }, 1000);
+        
+        res.json({ success: true, message: 'Bot restarting...' });
+    } catch (error) {
+        console.error('Restart error:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// API: LOGOUT
+wasi_app.post('/api/logout', async (req, res) => {
+    try {
+        const sessionId = req.query.sessionId || config.sessionId || 'wasi_session';
+        const session = sessions.get(sessionId);
+        
+        // Clear keep-alive
+        if (keepAliveIntervals.has(sessionId)) {
+            clearInterval(keepAliveIntervals.get(sessionId));
+            keepAliveIntervals.delete(sessionId);
+        }
+        
+        // Clear QR timeout
+        if (qrTimeouts.has(sessionId)) {
+            clearTimeout(qrTimeouts.get(sessionId));
+            qrTimeouts.delete(sessionId);
+        }
+        
+        if (session && session.sock) {
+            try {
+                await session.sock.logout();
+            } catch (e) {
+                console.error('Logout error:', e);
+            }
+            sessions.delete(sessionId);
+            await wasi_clearSession(sessionId);
+        }
+        
+        res.json({ success: true, message: 'Logged out successfully' });
+    } catch (error) {
+        console.error('Logout error:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// API: GET SESSIONS LIST
+wasi_app.get('/api/sessions', async (req, res) => {
+    try {
+        const sessionList = Array.from(sessions.keys()).map(id => ({
+            sessionId: id,
+            isConnected: sessions.get(id)?.isConnected || false,
+            hasQR: !!sessions.get(id)?.qr,
+            isConnecting: sessions.get(id)?.isConnecting || false,
+            keepAliveActive: keepAliveIntervals.has(id)
+        }));
+        
+        res.json({
+            success: true,
+            sessions: sessionList,
+            total: sessionList.length,
+            activeKeepAlives: keepAliveIntervals.size
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// API: HEALTH CHECK
+wasi_app.get('/api/health', async (req, res) => {
+    res.json({
+        status: 'ok',
+        uptime: process.uptime(),
+        timestamp: new Date().toISOString(),
+        memory: process.memoryUsage(),
+        sessions: sessions.size,
+        qrTimeouts: qrTimeouts.size,
+        keepAliveCount: keepAliveIntervals.size
+    });
 });
 
 // -----------------------------------------------------------------------------
@@ -546,6 +795,14 @@ function wasi_startServer() {
         console.log(`📡 Auto Forward: ${SOURCE_JIDS.length} source(s) → ${TARGET_JIDS.length} target(s)`);
         console.log(`✨ Message Cleaning: Forwarded labels removed, Newsletter markers cleaned`);
         console.log(`🤖 Bot Commands: !ping, !jid, !gjid`);
+        console.log(`🔄 Keep-Alive: Active (prevents 50-min timeout)`);
+        console.log(`\n📌 API Endpoints:`);
+        console.log(`   GET  /api/status      - Get bot status`);
+        console.log(`   POST /api/generate-qr - Generate new QR code`);
+        console.log(`   POST /api/restart     - Restart bot`);
+        console.log(`   POST /api/logout      - Logout bot`);
+        console.log(`   GET  /api/sessions    - List all sessions`);
+        console.log(`   GET  /api/health      - Health check`);
     });
 }
 
@@ -568,5 +825,42 @@ async function main() {
     // 3. Start server
     wasi_startServer();
 }
+
+// Handle process termination
+process.on('SIGINT', async () => {
+    console.log('🛑 Shutting down...');
+    for (const [sessionId, interval] of keepAliveIntervals) {
+        clearInterval(interval);
+    }
+    for (const [sessionId, timeout] of qrTimeouts) {
+        clearTimeout(timeout);
+    }
+    for (const [sessionId, session] of sessions) {
+        if (session.sock) {
+            try {
+                await session.sock.end(undefined);
+            } catch (e) {}
+        }
+    }
+    process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+    console.log('🛑 Shutting down...');
+    for (const [sessionId, interval] of keepAliveIntervals) {
+        clearInterval(interval);
+    }
+    for (const [sessionId, timeout] of qrTimeouts) {
+        clearTimeout(timeout);
+    }
+    for (const [sessionId, session] of sessions) {
+        if (session.sock) {
+            try {
+                await session.sock.end(undefined);
+            } catch (e) {}
+        }
+    }
+    process.exit(0);
+});
 
 main();
