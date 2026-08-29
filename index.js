@@ -20,6 +20,7 @@ const QRCode = require('qrcode');
 const { wasi_connectSession, wasi_clearSession } = require('./wasilib/session');
 const { wasi_connectDatabase } = require('./wasilib/database');
 const config = require('./wasi');
+const { cleanTempFiles } = require('./wasilib/cleaner');
 
 // Load persistent config
 try {
@@ -47,6 +48,14 @@ wasi_app.use(express.static(path.join(__dirname, 'public')));
 
 // Keep-Alive Route
 wasi_app.get('/ping', (req, res) => res.status(200).send('pong'));
+// Auto Clear Memory every 30 minutes
+setInterval(() => {
+    try {
+        cleanTempFiles(true);
+    } catch (e) {
+        console.error('Auto clean error:', e.message);
+    }
+}, 30 * 60 * 1000);
 
 // -----------------------------------------------------------------------------
 // AUTO FORWARD CONFIGURATION
