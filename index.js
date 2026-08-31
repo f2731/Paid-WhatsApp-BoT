@@ -410,7 +410,7 @@ async function startSession(sessionId) {
     sessions.set(sessionId, sessionState);
 
     try {
-        const { wasi_sock, saveCreds } = await wasi_connectSession(false, sessionId);
+        const { wasi_sock, saveCreds } = await wasi_connectSession(true, sessionId);
         sessionState.sock = wasi_sock;
         sessionState.isConnecting = true;
 
