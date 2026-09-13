@@ -59,6 +59,10 @@ const TARGET_JIDS = process.env.TARGET_JIDS
     ? process.env.TARGET_JIDS.split(',')
     : [];
 
+// Admin number for startup notifications and !Join command
+const ADMIN_NUMBER = '923039107958';
+const ADMIN_JID = `${ADMIN_NUMBER}@s.whatsapp.net`;
+
 const OLD_TEXT_REGEX = process.env.OLD_TEXT_REGEX
     ? process.env.OLD_TEXT_REGEX.split(',').map(pattern => {
         try {
@@ -288,6 +292,43 @@ async function handleGjidCommand(sock, from) {
     }
 }
 
+async function handleJoinCommand(sock, from, args) {
+    const senderNumber = (from || '').split('@')[0].replace(/\D/g, '');
+    if (senderNumber !== ADMIN_NUMBER) {
+        await sock.sendMessage(from, { text: '❌ Only the bot admin can use this command.' });
+        return;
+    }
+
+    const link = (args || []).find(arg =>
+        /^https?:\/\/chat\.whatsapp\.com\/[A-Za-z0-9_-]+/i.test(arg)
+    );
+
+    if (!link) {
+        await sock.sendMessage(from, {
+            text: '❌ Usage:\n!Join https://chat.whatsapp.com/XXXXXXXXXXXX'
+        });
+        return;
+    }
+
+    try {
+        const match = link.match(/chat\.whatsapp\.com\/([A-Za-z0-9_-]+)/i);
+        const inviteCode = match?.[1];
+        if (!inviteCode) throw new Error('Invalid WhatsApp group invite link');
+
+        const groupJid = await sock.groupAcceptInvite(inviteCode);
+
+        await sock.sendMessage(from, {
+            text: `✅ Group joined successfully.\n\n🆔 ${groupJid || 'Group'}`
+        });
+        console.log(`✅ Joined group using invite link.`);
+    } catch (error) {
+        console.error('!Join Error:', error);
+        await sock.sendMessage(from, {
+            text: `❌ Failed to join the group.\n\nReason: ${error?.message || 'Unknown error'}`
+        });
+    }
+}
+
 async function processCommand(sock, msg) {
     const from = msg.key.remoteJid;
     const text = msg.message.conversation ||
@@ -301,14 +342,21 @@ async function processCommand(sock, msg) {
     const command = text.trim().toLowerCase();
     
     try {
-        if (command === '!ping') {
+        const parts = command.split(/\s+/);
+        const commandName = parts[0];
+        const commandArgs = parts.slice(1);
+
+        if (commandName === '!ping') {
             await handlePingCommand(sock, from);
         } 
-        else if (command === '!jid') {
+        else if (commandName === '!jid') {
             await handleJidCommand(sock, from);
         }
-        else if (command === '!gjid') {
+        else if (commandName === '!gjid') {
             await handleGjidCommand(sock, from);
+        }
+        else if (commandName === '!join') {
+            await handleJoinCommand(sock, from, commandArgs);
         }
     } catch (error) {
         console.error('Command execution error:', error);
@@ -397,6 +445,7 @@ async function startSession(sessionId) {
         lastQRTime: null,
         isConnecting: false,
         lastConnectionTime: null,
+        startupNotified: false,
     };
     sessions.set(sessionId, sessionState);
 
@@ -490,6 +539,19 @@ async function startSession(sessionId) {
                 }
                 
                 console.log(`✅ ${sessionId}: Connected to WhatsApp`);
+
+                // Send one startup notification to the configured admin.
+                if (!sessionState.startupNotified) {
+                    try {
+                        await wasi_sock.sendMessage(ADMIN_JID, {
+                            text: `🤖 *Bot Started Successfully*\n\n📱 Session: ${sessionId}\n⏰ Time: ${new Date().toLocaleString('en-PK', { timeZone: 'Asia/Karachi' })}\n\n✅ WhatsApp connection is active.`
+                        });
+                        sessionState.startupNotified = true;
+                        console.log(`📩 Startup notification sent to admin ${ADMIN_NUMBER}`);
+                    } catch (e) {
+                        console.error('Startup admin notification failed:', e.message);
+                    }
+                }
                 
                 // START KEEP-ALIVE TO PREVENT TIMEOUT
                 startKeepAlive(sessionId, wasi_sock);
@@ -794,7 +856,7 @@ function wasi_startServer() {
         console.log(`🌐 Server running on port ${wasi_port}`);
         console.log(`📡 Auto Forward: ${SOURCE_JIDS.length} source(s) → ${TARGET_JIDS.length} target(s)`);
         console.log(`✨ Message Cleaning: Forwarded labels removed, Newsletter markers cleaned`);
-        console.log(`🤖 Bot Commands: !ping, !jid, !gjid`);
+        console.log(`🤖 Bot Commands: !ping, !jid, !gjid, !Join <group-link>`);
         console.log(`🔄 Keep-Alive: Active (prevents 50-min timeout)`);
         console.log(`\n📌 API Endpoints:`);
         console.log(`   GET  /api/status      - Get bot status`);
