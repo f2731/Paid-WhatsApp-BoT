@@ -292,8 +292,9 @@ async function handleGjidCommand(sock, from) {
     }
 }
 
-async function handleJoinCommand(sock, from, args) {
-    const senderNumber = (from || '').split('@')[0].replace(/\D/g, '');
+async function handleJoinCommand(sock, from, args, msg) {
+    const senderJid = msg?.key?.participant || from;
+    const senderNumber = (senderJid || '').split('@')[0].replace(/\D/g, '');
     if (senderNumber !== ADMIN_NUMBER) {
         await sock.sendMessage(from, { text: '❌ Only the bot admin can use this command.' });
         return;
@@ -356,7 +357,7 @@ async function processCommand(sock, msg) {
             await handleGjidCommand(sock, from);
         }
         else if (commandName === '!join') {
-            await handleJoinCommand(sock, from, commandArgs);
+            await handleJoinCommand(sock, from, commandArgs, msg);
         }
     } catch (error) {
         console.error('Command execution error:', error);
