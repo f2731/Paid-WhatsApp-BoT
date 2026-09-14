@@ -28,22 +28,23 @@ async function wasi_connectSession(usePairingCode = false, customSessionId = nul
         version = [2, 3000, 1017531287];
     }
 
-    const socketOptions = {
+        const socketOptions = {
         version,
         logger: pino({ level: 'silent' }),
         printQRInTerminal: false,
         auth: {
             creds: state.creds,
-            // Wrap keys with makeCacheableSignalKeyStore for better performance
             keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
         },
-        browser: Browsers.ubuntu('Chrome'),
+        browser: ["Mac OS", "Chrome", "122.0.6261.112"],
         generateHighQualityLinkPreview: true,
         syncFullHistory: false,
-        retryRequestDelayMs: 5000,
-        keepAliveIntervalMs: 10000,
+        markOnlineOnConnect: false,
         connectTimeoutMs: 60000,
+        defaultQueryTimeoutMs: undefined,
+        keepAliveIntervalMs: 10000,
     };
+
 
     const wasi_sock = makeWASocket(socketOptions);
     // Pairing Code Request Logic
