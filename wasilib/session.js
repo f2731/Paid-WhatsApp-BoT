@@ -23,7 +23,7 @@ async function wasi_connectSession(usePairingCode = false, customSessionId = nul
         version = [2, 3000, 1017531287];
     }
 
-    const socketOptions = {
+        const socketOptions = {
         version,
         logger: pino({ level: 'silent' }),
         printQRInTerminal: false,
@@ -34,10 +34,12 @@ async function wasi_connectSession(usePairingCode = false, customSessionId = nul
         browser: ["Ubuntu", "Chrome", "20.0.04"],
         generateHighQualityLinkPreview: true,
         syncFullHistory: false,
-        retryRequestDelayMs: 5000,
-        keepAliveIntervalMs: 10000,
+        markOnlineOnConnect: false,
         connectTimeoutMs: 60000,
+        defaultQueryTimeoutMs: undefined,
+        keepAliveIntervalMs: 10000,
     };
+
 
     const wasi_sock = makeWASocket(socketOptions);
 
