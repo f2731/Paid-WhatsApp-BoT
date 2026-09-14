@@ -31,7 +31,7 @@ async function wasi_connectSession(usePairingCode = false, customSessionId = nul
             creds: state.creds,
             keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
         },
-        browser: Browsers.ubuntu('Chrome'),
+        browser: ["Ubuntu", "Chrome", "20.0.04"],
         generateHighQualityLinkPreview: true,
         syncFullHistory: false,
         retryRequestDelayMs: 5000,
