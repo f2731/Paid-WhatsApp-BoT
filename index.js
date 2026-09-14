@@ -505,10 +505,12 @@ async function startSession(sessionId) {
                 
                 // Send presence available
                 try {
-                    await wasi_sock.sendPresenceAvailable();
-                } catch (e) {
-                    // Ignore presence errors
-                }
+    if (wasi_sock?.authState?.creds?.registered) {
+        await wasi_sock.sendPresenceAvailable();
+    }
+} catch (e) {
+    // Ignore presence errors
+}
             }
         });
 
