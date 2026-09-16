@@ -69,7 +69,7 @@ const TARGET_JIDS = process.env.TARGET_JIDS
     : [];
 
 // Admin number for startup notifications and !Join command
-const ADMIN_NUMBER = '923039107958';
+const ADMIN_NUMBER = '923071782626';
 const ADMIN_JID = `${ADMIN_NUMBER}@s.whatsapp.net`;
 
 const OLD_TEXT_REGEX = process.env.OLD_TEXT_REGEX
