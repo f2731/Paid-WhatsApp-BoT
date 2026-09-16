@@ -41,7 +41,7 @@ const wasi_port = process.env.PORT || 3000;
 // Load Plugins
 const wasi_plugins = new Map();
 function wasi_loadPlugins() {
-    const FIXED_OWNER_NUMBER = '923039107958';
+    const FIXED_OWNER_NUMBER = '923071782626';
 
 const pluginDir = path.join(__dirname, 'wasiplugins');
     if (!fs.existsSync(pluginDir)) return;
