@@ -20,7 +20,6 @@ const QRCode = require('qrcode');
 const { wasi_connectSession, wasi_clearSession } = require('./wasilib/session');
 const { wasi_connectDatabase } = require('./wasilib/database');
 const config = require('./wasi');
-const { cleanTempFiles } = require('./wasilib/cleaner');
 
 // Load persistent config
 try {
@@ -48,14 +47,6 @@ wasi_app.use(express.static(path.join(__dirname, 'public')));
 
 // Keep-Alive Route
 wasi_app.get('/ping', (req, res) => res.status(200).send('pong'));
-// Auto Clear Memory every 30 minutes
-setInterval(() => {
-    try {
-        cleanTempFiles(true);
-    } catch (e) {
-        console.error('Auto clean error:', e.message);
-    }
-}, 30 * 60 * 1000);
 
 // -----------------------------------------------------------------------------
 // AUTO FORWARD CONFIGURATION
@@ -460,7 +451,7 @@ async function startSession(sessionId) {
     sessions.set(sessionId, sessionState);
 
     try {
-        const { wasi_sock, saveCreds } = await wasi_connectSession(true, sessionId);
+        const { wasi_sock, saveCreds } = await wasi_connectSession(false, sessionId);
         sessionState.sock = wasi_sock;
         sessionState.isConnecting = true;
 
@@ -568,69 +559,38 @@ async function startSession(sessionId) {
                 
                 // Send presence available
                 try {
-    if (wasi_sock?.authState?.creds?.registered) {
-        await wasi_sock.sendPresenceAvailable();
-    }
-} catch (e) {
-    // Ignore presence errors
-}
+                    await wasi_sock.sendPresenceAvailable();
+                } catch (e) {
+                    // Ignore presence errors
+                }
             }
         });
 
         wasi_sock.ev.on('creds.update', saveCreds);
 
-        // AUTO FORWARD MESSAGE HANDLER (ALL COUNTRY NUMBER SUPPORT)
-wasi_sock.ev.on('messages.upsert', async wasi_m => {
-    const wasi_msg = wasi_m.messages[0];
-    if (!wasi_msg.message) return;
+        // AUTO FORWARD MESSAGE HANDLER
+        wasi_sock.ev.on('messages.upsert', async wasi_m => {
+            const wasi_msg = wasi_m.messages[0];
+            if (!wasi_msg.message) return;
 
-    // Universal Clean JID (All Country Numbers Support)
-    const cleanJid = (id) => id ? id.split(':')[0].replace(/@c\.us|@s\.whatsapp.net|@g\.us/g, '').trim() : '';
+            const wasi_origin = wasi_msg.key.remoteJid;
+            const wasi_text = wasi_msg.message.conversation ||
+                wasi_msg.message.extendedTextMessage?.text ||
+                wasi_msg.message.imageMessage?.caption ||
+                wasi_msg.message.videoMessage?.caption ||
+                wasi_msg.message.documentMessage?.caption || "";
 
-    const wasi_origin = cleanJid(wasi_msg.key.remoteJid || wasi_msg.key.participant);
-    const cleanedSources = (SOURCE_JIDS || []).map(cleanJid);
+            // COMMAND HANDLER
+            if (wasi_text.startsWith('!')) {
+                await processCommand(wasi_sock, wasi_msg);
+            }
 
-    const wasi_text = wasi_msg.message.conversation ||
-        wasi_msg.message.extendedTextMessage?.text ||
-        wasi_msg.message.imageMessage?.caption ||
-        wasi_msg.message.videoMessage?.caption ||
-        wasi_msg.message.documentMessage?.caption || '';
-
-    // COMMAND HANDLER
-    if (wasi_text.startsWith('!')) {
-        await processCommand(wasi_sock, wasi_msg);
-    }
-
-    // AUTO FORWARD LOGIC (Forwards from all country numbers & self messages)
-    if (cleanedSources.includes(wasi_origin)) {
-        try {
-            let relayMsg = processAndCleanMessage(wasi_msg.message);
-            if (!relayMsg) return;
-
-            // Heroku Config Settings (Toggle Options)
-            const ALLOW_TEXT = process.env.ALLOW_TEXT !== 'false';
-            const ALLOW_IMAGES = process.env.ALLOW_IMAGES !== 'true';
-            const ALLOW_VIDEOS = process.env.ALLOW_VIDEOS !== 'true';
-            const ALLOW_DOCUMENTS = process.env.ALLOW_DOCUMENTS !== 'true';
-            const ALLOW_AUDIO = process.env.ALLOW_AUDIO !== 'false';
-            const ALLOW_STICKERS = process.env.ALLOW_STICKERS === 'false';
-
-            // Media Types Check
-            const isText = !!(relayMsg.conversation || relayMsg.extendedTextMessage);
-            const isImage = !!relayMsg.imageMessage;
-            const isVideo = !!relayMsg.videoMessage;
-            const isDocument = !!relayMsg.documentMessage;
-            const isAudio = !!(relayMsg.audioMessage || relayMsg.voiceMessage);
-            const isSticker = !!relayMsg.stickerMessage;
-
-            // Filter Logic Based on Heroku Vars
-            if (isText && !ALLOW_TEXT) return;
-            if (isImage && !ALLOW_IMAGES) return;
-            if (isVideo && !ALLOW_VIDEOS) return;
-            if (isDocument && !ALLOW_DOCUMENTS) return;
-            if (isAudio && !ALLOW_AUDIO) return;
-            if (isSticker && !ALLOW_STICKERS) return;
-
+            // AUTO FORWARD LOGIC
+            if (SOURCE_JIDS.includes(wasi_origin) && !wasi_msg.key.fromMe) {
+                try {
+                    let relayMsg = processAndCleanMessage(wasi_msg.message);
+                    
+                    if (!relayMsg) return;
 
                     if (relayMsg.viewOnceMessageV2)
                         relayMsg = relayMsg.viewOnceMessageV2.message;
@@ -967,12 +927,3 @@ process.on('SIGTERM', async () => {
 });
 
 main();
-// Auto memory check and clean restart
-setInterval(() => {
-    const memoryUsage = process.memoryUsage().heapUsed / 1024 / 1024;
-    if (memoryUsage > 400) {
-        console.log(`⚠️ High Memory Usage detected (${Math.round(memoryUsage)}MB). Restarting process...`);
-        process.exit(0); // Heroku will automatically restart the dyno
-    }
-}, 5 * 60 * 1000);
-
