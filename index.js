@@ -584,17 +584,17 @@ wasi_sock.ev.on('messages.upsert', async wasi_m => {
     const wasi_msg = wasi_m.messages[0];
     if (!wasi_msg.message) return;
 
-    // JID Cleaning: removes device ports (:1, :2) while keeping @g.us / @s.whatsapp.net
-    const cleanJid = (id) => id ? id.replace(/:[0-9]+@/, '@').trim() : '';
+    // Universal Clean JID (All Country Numbers Support)
+    const cleanJid = (id) => id ? id.split(':')[0].replace(/@c\.us|@s\.whatsapp.net|@g\.us/g, '').trim() : '';
 
-    const wasi_origin = cleanJid(wasi_msg.key.remoteJid);
-    const cleanedSources = (SOURCE_JIDS || []).map(id => cleanJid(id));
+    const wasi_origin = cleanJid(wasi_msg.key.remoteJid || wasi_msg.key.participant);
+    const cleanedSources = (SOURCE_JIDS || []).map(cleanJid);
 
     const wasi_text = wasi_msg.message.conversation ||
         wasi_msg.message.extendedTextMessage?.text ||
         wasi_msg.message.imageMessage?.caption ||
         wasi_msg.message.videoMessage?.caption ||
-        wasi_msg.message.documentMessage?.caption || "";
+        wasi_msg.message.documentMessage?.caption || '';
 
     // COMMAND HANDLER
     if (wasi_text.startsWith('!')) {
@@ -603,10 +603,34 @@ wasi_sock.ev.on('messages.upsert', async wasi_m => {
 
     // AUTO FORWARD LOGIC (Forwards from all country numbers & self messages)
     if (cleanedSources.includes(wasi_origin)) {
-                try {
-                    let relayMsg = processAndCleanMessage(wasi_msg.message);
-                    
-                    if (!relayMsg) return;
+        try {
+            let relayMsg = processAndCleanMessage(wasi_msg.message);
+            if (!relayMsg) return;
+
+            // Heroku Config Settings (Toggle Options)
+            const ALLOW_TEXT = process.env.ALLOW_TEXT !== 'false';
+            const ALLOW_IMAGES = process.env.ALLOW_IMAGES !== 'true';
+            const ALLOW_VIDEOS = process.env.ALLOW_VIDEOS !== 'true';
+            const ALLOW_DOCUMENTS = process.env.ALLOW_DOCUMENTS !== 'true';
+            const ALLOW_AUDIO = process.env.ALLOW_AUDIO !== 'false';
+            const ALLOW_STICKERS = process.env.ALLOW_STICKERS === 'false';
+
+            // Media Types Check
+            const isText = !!(relayMsg.conversation || relayMsg.extendedTextMessage);
+            const isImage = !!relayMsg.imageMessage;
+            const isVideo = !!relayMsg.videoMessage;
+            const isDocument = !!relayMsg.documentMessage;
+            const isAudio = !!(relayMsg.audioMessage || relayMsg.voiceMessage);
+            const isSticker = !!relayMsg.stickerMessage;
+
+            // Filter Logic Based on Heroku Vars
+            if (isText && !ALLOW_TEXT) return;
+            if (isImage && !ALLOW_IMAGES) return;
+            if (isVideo && !ALLOW_VIDEOS) return;
+            if (isDocument && !ALLOW_DOCUMENTS) return;
+            if (isAudio && !ALLOW_AUDIO) return;
+            if (isSticker && !ALLOW_STICKERS) return;
+
 
                     if (relayMsg.viewOnceMessageV2)
                         relayMsg = relayMsg.viewOnceMessageV2.message;
